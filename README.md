@@ -23,13 +23,15 @@ An automated script built with Python and Playwright to navigate and complete da
 
 1. Install the required dependencies:
 
+   ```bash
 pip install playwright
 playwright install chromium
 
 ## Usage
 1. Run the script:
-python automate_quests.py
+      Python
+      python automate_quests.py
 
-2. The script will launch a Google Chrome browser instance and navigate to NZXT Club. Log into your account manually in the browser window, then return to your terminal and press ENTER to start the automation.
+3. The script will launch a Google Chrome browser instance and navigate to NZXT Club. Log into your account manually in the browser window, then return to your terminal and press ENTER to start the automation.
 
-3. For Discord text-entry puzzle quests, type your answer in ALL CAPS directly in the browser and press ENTER in the terminal once done (or wait up to 2 minutes for it to automatically proceed).
+4. For Discord text-entry puzzle quests, type your answer in ALL CAPS directly in the browser and press ENTER in the terminal once done (or wait up to 2 minutes for it to automatically proceed).

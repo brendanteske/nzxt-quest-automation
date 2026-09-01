@@ -1,23 +1,23 @@
 import os
-import time
+import re
 import sys
+import time
 import select
 from playwright.sync_api import sync_playwright
 
 def run_automation():
     user_data_dir = os.path.join(os.getcwd(), "browser_profile")
     
-    # Categories with Discord placed last
     quest_categories = [
-        "https://club.nzxt.com/modules/2972",
-        "https://club.nzxt.com/modules/x-quests",
-        "https://club.nzxt.com/modules/facebook-quests",
-        "https://club.nzxt.com/modules/instagram-quests",
-        "https://club.nzxt.com/modules/tiktok-quests",
-        "https://club.nzxt.com/modules/reddit-quests",
-        "https://club.nzxt.com/modules/youtube-quests",
-        "https://club.nzxt.com/modules/twitch-quests",
-        "https://club.nzxt.com/modules/discord-quests"  # Discord last
+        "https://club.nzxt.com/v2/nzxt-club-quests/daily-checkin",
+        "https://club.nzxt.com/v2/nzxt-club-quests/x-twitter-quests",
+        "https://club.nzxt.com/v2/nzxt-club-quests/facebook-quests",
+        "https://club.nzxt.com/v2/nzxt-club-quests/instagram-quests",
+        "https://club.nzxt.com/v2/nzxt-club-quests/tiktok-quests",
+        "https://club.nzxt.com/v2/nzxt-club-quests/reddit-quests",
+        "https://club.nzxt.com/v2/nzxt-club-quests/youtube-quests",
+        "https://club.nzxt.com/v2/nzxt-club-quests/twitch-quests",
+        "https://club.nzxt.com/v2/nzxt-club-quests/discord-quests"  # Discord last
     ]
     
     with sync_playwright() as p:
@@ -26,13 +26,15 @@ def run_automation():
             user_data_dir=user_data_dir,
             channel="chrome",
             headless=False,
-            viewport={"width": 1510, "height": 1232}
+            viewport={"width": 1510, "height": 1232},
+            ignore_default_args=["--enable-automation"],
+            args=["--disable-blink-features=AutomationControlled"]
         )
         
         page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
         
-        print("Navigating to NZXT Club...")
-        page.goto("https://club.nzxt.com/")
+        print("Navigating to NZXT Club Login...")
+        page.goto("https://club.nzxt.com/v2/onboarding/login")
         
         print("\n" + "="*50)
         print("ACTION REQUIRED: Please log into your profile in the browser window.")
@@ -46,168 +48,144 @@ def run_automation():
         print("Press Ctrl + C in your terminal at any time to stop.\n")
 
         try:
-            # Click the main "NZXT Quests" sidebar button first
-            print("Looking for 'NZXT Quests' sidebar button...")
-            nzxt_quests_btn = page.locator("button", has_text="NZXT Quests")
-            if nzxt_quests_btn.count() > 0 and nzxt_quests_btn.first.is_visible():
-                nzxt_quests_btn.first.click(force=True)
-                print("Clicked NZXT Quests button successfully!")
-                page.wait_for_timeout(3000)
-            else:
-                print("Could not find NZXT Quests button directly, proceeding to category URLs...")
-
-            # Cycle through each category link
             for cat_url in quest_categories:
                 print(f"\nNavigating to category: {cat_url}")
                 page.goto(cat_url)
+                
+                # Wait for hydration
                 page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_selector(".hv2-skeleton", state="detached", timeout=10000)
+                except Exception:
+                    pass
 
                 is_discord = "discord-quests" in cat_url
 
-                # Special handling for Daily Check-in calendar view (modules/2972)
-                if "2972" in cat_url:
-                    print("Processing Daily Check-in calendar days...")
+                # Daily Check-in Logic
+                if "daily-checkin" in cat_url:
+                    print("Processing Daily Check-in button...")
                     try:
-                        claimed_daily = page.evaluate("""() => {
-                            const dayCards = Array.from(document.querySelectorAll('div, button'));
-                            const todayButton = dayCards.find(el => {
-                                const text = (el.innerText || '').toLowerCase();
-                                return el.tagName === 'BUTTON' && text.includes('✓') == false && text.includes('🔒') == false;
-                            });
-                            
-                            if (todayButton) {
-                                todayButton.click();
-                                return true;
-                            }
-                            return false;
-                        }""")
-                        if claimed_daily:
-                            print("Successfully claimed today's daily check-in!")
-                            page.wait_for_timeout(3000)
+                        already_checked = page.locator("text=/Checked in for today/i").count() > 0
+                        if already_checked:
+                            print("Daily check-in already completed for today.")
                         else:
-                            print("No claimable daily check-in button available today.")
+                            check_in_btn = page.locator("button, a").filter(has_text=re.compile(r"^check\s*in$", re.I)).first
+                            if check_in_btn.is_visible():
+                                check_in_btn.click()
+                                print("Successfully clicked the 'Check in' button!")
+                                page.wait_for_timeout(3000)
+                            else:
+                                print("No active 'Check in' button found.")
                     except Exception as e:
                         print(f"Skipped daily check-in interaction due to: {e}")
                     continue
 
-                # Standard Quest Category Processing Loop
-                while True:
-                    page.wait_for_timeout(2000)
+                # Target URL quest links
+                try:
+                    page.wait_for_selector('a[href*="?d=quest:"]', timeout=10000)
+                except Exception:
+                    print("No quest links found on page.")
+                    continue
 
-                    start_buttons = page.locator("button", has_text="Start Quest")
-                    claim_check = page.locator("button, a, div", has_text="Claim Reward")
-                    
-                    if start_buttons.count() == 0 and claim_check.count() == 0:
-                        break
+                quest_links = page.locator('a[href*="?d=quest:"]').all()
+                print(f"Found {len(quest_links)} total quest links on page.")
 
-                    # Click Start Quest if available
-                    if start_buttons.count() > 0 and start_buttons.first.is_visible():
-                        print("Clicking Start Quest...")
-                        start_buttons.first.click()
-                        page.wait_for_timeout(3000)
+                unclaimed_count = 0
+                for link in quest_links:
+                    try:
+                        # Check the ENTIRE parent card container for completion indicators
+                        is_claimed = link.evaluate("""el => {
+                            // Find parent container box (walk up parent nodes)
+                            let card = el.closest('div[style*="border"], div[class*="card"], li, div[data-block-type]') || el.parentElement;
+                            
+                            if (!card) card = el;
 
-                    # If this is Discord, handle puzzle input with 2-minute timer or early Enter press
-                    if is_discord:
-                        print("\n" + "!"*50)
-                        print("DISCORD PUZZLE DETECTED: Type the answer in ALL CAPS and submit.")
-                        print("Press ENTER here in the terminal once done, or wait up to 2 minutes.")
-                        print("!"*50 + "\n")
-                        
-                        start_time = time.time()
-                        timeout = 120
-                        
-                        if os.name == 'nt':
-                            # Windows non-blocking input check approach
-                            import msvcrt
-                            while time.time() - start_time < timeout:
-                                if msvcrt.kbhit():
-                                    if msvcrt.getch() in [b'\r', b'\n']:
-                                        print("\nEnter pressed. Continuing workflow...")
-                                        break
-                                time.sleep(0.1)
-                        else:
-                            # Unix select-based input check approach
-                            while time.time() - start_time < timeout:
-                                rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
-                                if rlist:
-                                    sys.stdin.readline()
-                                    print("\nEnter pressed. Continuing workflow...")
-                                    break
-                    else:
-                        # Standard External Link Handling for other categories
-                        print("Looking for external link button...")
-                        link_clicked = False
-                        for _ in range(10):
-                            link_element = page.locator("a, button, [role='button']", has_text="Click the link")
-                            if link_element.count() > 0 and link_element.first.is_visible():
-                                try:
-                                    link_element.first.click()
-                                    print("Successfully clicked external link!")
-                                    link_clicked = True
-                                    break
-                                except Exception:
-                                    pass
-                            page.wait_for_timeout(1000)
-                        
-                        if link_clicked:
-                            page.wait_for_timeout(4000)
-                            if len(browser_context.pages) > 1:
-                                for extra_page in browser_context.pages[1:]:
+                            // Check text content inside parent card
+                            const cardText = (card.innerText || '').toUpperCase();
+                            if (cardText.includes('CLAIMED')) return true;
+
+                            // Check for checkmark icon anywhere inside parent card
+                            const hasCheckIcon = card.querySelector('.fa-check, i[class*="check"], svg[class*="check"]') !== null;
+                            if (hasCheckIcon) return true;
+
+                            // Check circle styling for active accent background
+                            const spans = Array.from(card.querySelectorAll('span'));
+                            const hasAccentCircle = spans.some(s => s.getAttribute('style') && s.getAttribute('style').includes('var(--hv2-color-accent)'));
+                            if (hasAccentCircle) return true;
+
+                            return false;
+                        }""")
+
+                        if is_claimed:
+                            continue
+
+                        unclaimed_count += 1
+                        href = link.get_attribute("href")
+                        print(f"Opening unclaimed quest: {href}")
+
+                        link.scroll_into_view_if_needed()
+                        link.click()
+                        page.wait_for_timeout(1500)
+
+                        # Locate modal dialog
+                        modal = page.locator('div[role="dialog"], [class*="modal"]')
+                        if modal.is_visible():
+                            if is_discord:
+                                print("\n" + "!"*50)
+                                print("DISCORD PUZZLE DETECTED: Type the answer in ALL CAPS and submit.")
+                                print("Press ENTER here in the terminal once done, or wait up to 2 minutes.")
+                                print("!"*50 + "\n")
+                                
+                                start_time = time.time()
+                                timeout = 120
+                                
+                                if os.name == 'nt':
+                                    import msvcrt
+                                    while time.time() - start_time < timeout:
+                                        if msvcrt.kbhit():
+                                            if msvcrt.getch() in [b'\r', b'\n']:
+                                                print("\nEnter pressed. Continuing workflow...")
+                                                break
+                                        time.sleep(0.1)
+                                else:
+                                    while time.time() - start_time < timeout:
+                                        rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+                                        if rlist:
+                                            sys.stdin.readline()
+                                            print("\nEnter pressed. Continuing workflow...")
+                                            break
+                            else:
+                                action_btn = modal.locator('a, button').filter(has_text=re.compile(r"open link|start|verify|claim", re.I)).first
+                                if action_btn.is_visible():
+                                    print("Clicking action button inside modal...")
                                     try:
-                                        extra_page.close()
+                                        with browser_context.expect_page(timeout=4000) as new_page_info:
+                                            action_btn.click()
+                                        
+                                        new_tab = new_page_info.value
+                                        new_tab.wait_for_load_state()
+                                        new_tab.close()
+                                        print("Closed external tab.")
                                     except Exception:
                                         pass
-                                print("Extra tabs closed.")
 
-                    page.wait_for_timeout(2000)
-                    page.reload()
-                    page.wait_for_timeout(3000)
+                                page.wait_for_timeout(2000)
 
-                    # Find and Click Claim Reward
-                    print("Waiting for Claim Reward button...")
-                    claimed = False
-                    for _ in range(20):
-                        try:
-                            claimed = page.evaluate("""() => {
-                                const elements = Array.from(document.querySelectorAll('button, div, span, a'));
-                                const target = elements.find(el => 
-                                    el.innerText && 
-                                    el.innerText.trim().toLowerCase() === 'claim reward' && 
-                                    el.offsetParent !== null
-                                );
-                                if (target) {
-                                    target.click();
-                                    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                                    return true;
-                                }
-                                return false;
-                            }""")
+                            # Close modal
+                            close_btn = modal.locator('button:has(.fa-xmark), button:has(.fa-times), button[aria-label="Close"], button.modal-close').first
+                            if close_btn.is_visible():
+                                close_btn.click()
+                            else:
+                                page.keyboard.press("Escape")
+                            
+                            page.wait_for_timeout(1000)
 
-                            if claimed:
-                                print("Successfully triggered Claim Reward via direct DOM execution!")
-                                break
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(1000)
+                    except Exception as e:
+                        print(f"Error processing quest item: {e}")
+                        continue
 
-                    if claimed:
-                        page.wait_for_timeout(4000)
-
-                    # Close Popup Modal
-                    print("Looking for modal close button...")
-                    for _ in range(6):
-                        close_btn = page.locator("button.modal-close")
-                        if close_btn.count() > 0 and close_btn.first.is_visible():
-                            try:
-                                close_btn.first.click(force=True)
-                                print("Modal successfully closed via button.modal-close!")
-                                page.wait_for_timeout(3000) 
-                                break
-                            except Exception:
-                                pass
-                        page.wait_for_timeout(1000)
-
-                    break # Move to next category after finishing current items
+                if unclaimed_count == 0:
+                    print("All quests in this category are already claimed.")
 
             print("\nAll categories processed successfully!")
 

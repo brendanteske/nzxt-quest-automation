@@ -4,10 +4,13 @@ An automated script built with Python and Playwright to navigate and complete da
 
 ## Features
 
-* **Automated Navigation:** Automatically logs in and loops through multiple quest categories (including X, Facebook, Instagram, TikTok, Reddit, YouTube, Twitch, and Discord).
-* **Daily Check-In Handling:** Automatically checks and claims daily calendar rewards.
-* **Interactive Discord Puzzles:** Automatically detects Discord puzzle quests and pauses with a dual 2-minute timeout or manual terminal confirmation so you can solve text inputs.
-* **Persistent Session:** Uses a local persistent browser profile so you only need to log in manually during the first run.
+* **Automated Navigation:** Automatically loops through multiple quest categories (including X, Facebook, Instagram, TikTok, Reddit, YouTube, Twitch, and Discord) to open and complete available quests.
+* **Daily Check-In Handling:** Automatically checks in and claims daily calendar rewards.
+* **Automated Login & 2FA:** Fills account credentials, handles ALTCHA captcha verification, and automatically retrieves 6-digit verification codes via Gmail IMAP.
+* **Auto-Dependency Setup:** Checks and installs missing Python packages (`playwright`, `beautifulsoup4`) and browser components automatically on launch.
+* **Discord Webhook Alerts:** Sends status notifications to Discord if manual intervention or login verification is needed.
+* **Rotating Weekly Logging:** Writes output to a local log file that resets automatically every 7 days.
+* **Persistent Session:** Saves session details in a local browser profile to bypass repeat logins on subsequent runs.
 
 ## Prerequisites
 
@@ -20,18 +23,33 @@ An automated script built with Python and Playwright to navigate and complete da
    ```bash
    git clone [https://github.com/brendanteske/nzxt-quest-automation.git](https://github.com/brendanteske/nzxt-quest-automation.git)
    cd nzxt-quest-automation
-   
-1. Install the required dependencies:
 
-   ```Bash
-   pip install playwright
-   playwright install chromium
-   
-## Usage
-1. Run the script:
+1. Run the script (dependencies will be verified and installed automatically):
    ```bash
    python automate_quests.py
 
-2. The script will launch a Google Chrome browser instance and navigate to NZXT Club. Log into your account manually in the browser window, then return to your terminal and press ENTER to start the automation.
+## Configuration
+On the first run, the script automatically generates a config.json file in the project directory. Populate this file with your details:
 
-3. For Discord text-entry puzzle quests, type your answer in ALL CAPS directly in the browser and press ENTER in the terminal once done (or wait up to 2 minutes for it to automatically proceed).
+   ```bash
+   {
+       "discord_webhook_url": "YOUR_DISCORD_WEBHOOK_URL",
+       "account_email": "YOUR_NZXT_EMAIL",
+       "account_password": "YOUR_NZXT_PASSWORD",
+       "gmail_app_password": "YOUR_GMAIL_APP_PASSWORD",
+       "email_sender_filter": "do-not-reply@club.nzxt.com",
+       "headless_mode": false,
+       "login_timeout_minutes": 5,
+       "dependencies_installed": false
+   }
+   ```
+
+## Usage
+
+1. Launch the automation:
+   ```bash
+   python automate_quests.py
+
+2. The script checks for active authentication. If unauthenticated, it automatically completes the login sequence, solves the captcha, and processes 2FA verification.
+
+3. If manual intervention is required, the script sends an alert to your Discord webhook and waits up to the configured timeout for you to complete login manually before proceeding with quest processing.

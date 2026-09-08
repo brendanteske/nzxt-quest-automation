@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "account_password": "",
     "gmail_app_password": "",
     "email_sender_filter": "do-not-reply@club.nzxt.com",
+    "gemini_api_key": "",
     "headless_mode": False,
     "login_timeout_minutes": 5,
     "dependencies_installed": False
@@ -23,6 +24,8 @@ DEFAULT_CONFIG = {
 def setup_weekly_logger():
     """Manages a rotating log file that resets automatically every 7 days."""
     import time
+    from datetime import datetime
+
     current_time = time.time()
     one_week_seconds = 7 * 24 * 60 * 60
 
@@ -50,10 +53,32 @@ def setup_weekly_logger():
         def __init__(self):
             self.terminal = sys.stdout
             self.log = open(LOG_PATH, "a", encoding="utf-8")
+            self.at_line_start = True
 
         def write(self, message):
-            self.terminal.write(message)
-            self.log.write(message)
+            if not message:
+                return
+
+            timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
+            
+            # Format multi-line messages or simple strings so timestamps attach to new lines
+            lines = message.split("\n")
+            formatted_message = ""
+
+            for i, line in enumerate(lines):
+                if i > 0:
+                    formatted_message += "\n"
+                    self.at_line_start = True
+                
+                if line:
+                    if self.at_line_start:
+                        formatted_message += timestamp + line
+                        self.at_line_start = False
+                    else:
+                        formatted_message += line
+
+            self.terminal.write(formatted_message)
+            self.log.write(formatted_message)
             self.log.flush()
 
         def flush(self):
@@ -104,7 +129,8 @@ def verify_and_install_dependencies():
     print("[Setup] Checking required dependencies...")
     required_packages = {
         "playwright": "playwright",
-        "bs4": "beautifulsoup4"
+        "bs4": "beautifulsoup4",
+        "google.genai": "google-genai"
     }
 
     missing_packages = []
@@ -249,7 +275,6 @@ def fetch_latest_verification_code(gmail_address, app_password, sender_filter="d
 
     return None
 
-
 def handle_verification_code(page, config):
     """Attempts to auto-fetch code from Gmail and enter it across the 6 split digit input fields."""
     gmail_addr = config.get("account_email", "")
@@ -260,7 +285,6 @@ def handle_verification_code(page, config):
         print("[Verification] No Gmail App Password provided. Cannot fetch code automatically.")
         return False
 
-    # Updated delay: wait 15 seconds for the email to arrive
     print("[Verification] Waiting 15 seconds for verification email to arrive...")
     page.wait_for_timeout(15000)
 
@@ -273,8 +297,6 @@ def handle_verification_code(page, config):
     if code and len(code) == 6:
         try:
             print(f"[Verification] Auto-filling 6-digit code: {code}")
-            
-            # Check for the split multi-input digit fields
             digit_inputs = page.locator('input[aria-label^="Digit "]').all()
             
             if len(digit_inputs) >= 6:
@@ -283,14 +305,12 @@ def handle_verification_code(page, config):
                     digit_inputs[idx].fill(digit, force=True)
                     page.wait_for_timeout(100)
             else:
-                # Strategy B: Fallback to single code input field if layout differs
                 code_input = page.locator('input[name*="code" i], input[placeholder*="code" i], input[type="text"]').first
                 if code_input.is_visible():
                     code_input.fill(code, force=True)
 
             page.wait_for_timeout(1000)
 
-            # Click verification submission button if present
             verify_btn = page.locator('button:has-text("Verify"), button:has-text("Submit"), button[type="submit"]').first
             if verify_btn.is_visible() and verify_btn.is_enabled():
                 verify_btn.click(force=True)
@@ -303,6 +323,280 @@ def handle_verification_code(page, config):
 
     return False
 
+def query_gemini_api(prompt_text, api_key):
+    """Sends a query to Google Gemini API using the official Google GenAI SDK."""
+    if not api_key:
+        print("[Gemini] Skipped: No gemini_api_key set in config.json.")
+        return None
+
+    try:
+        from google import genai
+        
+        client = genai.Client(api_key=api_key)
+        
+        formatted_prompt = (
+            f"Solve this puzzle or question and reply ONLY with the exact answer string. "
+            f"Do not include explanation, punctuation, quotes, or introduction. "
+            f"If ALL CAPS is requested in the prompt, strictly output ALL CAPS. Prompt: '{prompt_text}'"
+        )
+
+        response = client.models.generate_content(
+            model='gemini-3.6-flash',
+            contents=formatted_prompt,
+        )
+        
+        if response.text:
+            return response.text.strip()
+            
+    except Exception as e:
+        print(f"[Gemini API Error] Failed to resolve question: {e}")
+        return None
+
+def solve_worldle_on_site(browser_context, max_guesses=6):
+    """
+    Opens Worldle, repeatedly clicks the randomize dice button and submits guesses.
+    Returns the solved country name or extracts the answer upon game completion.
+    """
+    print("[Worldle Automation] Navigating to Worldle (teuteuf.fr)...")
+    worldle_page = browser_context.new_page()
+    revealed_answer = None
+
+    try:
+        worldle_page.goto("https://worldle.teuteuf.fr/", wait_until="networkidle")
+        worldle_page.wait_for_timeout(3000)
+
+        # Handle modal popups or cookies
+        try:
+            accept_btn = worldle_page.locator('button:has-text("Accept"), button:has-text("Agree")').first
+            if accept_btn.is_visible(timeout=3000):
+                accept_btn.click()
+                worldle_page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        solved = False
+
+        for attempt in range(1, max_guesses + 1):
+            print(f"[Worldle Automation] Executing random guess attempt {attempt}/{max_guesses}...")
+
+            # 1. Click the randomize (dice) button
+            dice_btn = worldle_page.locator('[data-testid="dice"]').first
+            if dice_btn.is_visible():
+                dice_btn.click(force=True)
+            else:
+                worldle_page.locator('div.cursor-pointer:has(svg)').first.click(force=True)
+
+            # Added 3-second delay to allow board animations and input state to fully settle
+            worldle_page.wait_for_timeout(3000)
+
+            # 2. Click the Submit 'Guess' button
+            guess_btn = worldle_page.locator('button[type="submit"]:has-text("Guess"), button:has([data-testid="PublicRoundedIcon"])').first
+            if not guess_btn.is_visible():
+                guess_btn = worldle_page.locator('button[type="submit"]').first
+
+            if guess_btn.is_visible():
+                guess_btn.click(force=True)
+                worldle_page.wait_for_timeout(2500)
+
+            # Check for win condition text
+            victory_text = worldle_page.locator("text=/Splendid|Awesome|Victory|You won/i")
+            if victory_text.count() > 0 and victory_text.first.is_visible():
+                print(f"[Worldle Automation] Guessed correctly on attempt {attempt}!")
+                solved = True
+                break
+
+        # If 6 random guesses were spent, scrape the revealed answer banner
+        if not solved:
+            print("[Worldle Automation] All attempts spent. Extracting revealed country answer from banner...")
+            worldle_page.wait_for_timeout(2000)
+
+            # Target the "Country: <span class='font-semibold'>CountryName</span>" element directly
+            country_span = worldle_page.locator('span.font-semibold').first
+            if country_span.is_visible():
+                revealed_answer = country_span.inner_text().strip()
+                print(f"[Worldle Automation] Successfully extracted answer from banner span: {revealed_answer}")
+
+            # Fallback regex targeting the banner text container directly
+            if not revealed_answer:
+                banner_el = worldle_page.locator('div:has-text("Country:")').last
+                if banner_el.is_visible():
+                    banner_text = banner_el.inner_text()
+                    match = re.search(r'Country:\s*([A-Za-z\s]+)', banner_text, re.I)
+                    if match:
+                        revealed_answer = match.group(1).strip()
+                        print(f"[Worldle Automation] Extracted answer via banner container regex: {revealed_answer}")
+
+            # General body text fallback
+            if not revealed_answer:
+                body_text = worldle_page.locator("body").inner_text()
+                match = re.search(r'Country:\s*([A-Za-z\s]+)', body_text, re.I)
+                if match:
+                    revealed_answer = match.group(1).strip()
+                    print(f"[Worldle Automation] Extracted answer via fallback body text regex: {revealed_answer}")
+
+    except Exception as e:
+        print(f"[Worldle Automation] Error while processing Worldle site: {e}")
+    finally:
+        worldle_page.close()
+
+    return revealed_answer
+
+
+def solve_nytimes_wordle_on_site(browser_context, max_guesses=6):
+    """
+    Navigates to NYT Wordle, submits 5-letter guesses via virtual keyboard,
+    and scrapes the revealed correct answer if all attempts fail.
+    """
+    print("[NYT Wordle] Navigating to New York Times Wordle...")
+    wordle_page = browser_context.new_page()
+    revealed_answer = None
+
+    # Sample standard 5-letter starter words for random guessing
+    starter_words = ["CRANE", "SLATE", "AUDIO", "RAISE", "SHINE", "GHOST"]
+
+    try:
+        wordle_page.goto("https://www.nytimes.com/games/wordle/index.html", wait_until="networkidle")
+        wordle_page.wait_for_timeout(3000)
+
+        # Handle cookie consent, welcome modals, and landing page play button
+        try:
+            accept_btn = wordle_page.locator('button:has-text("Accept"), button:has-text("OK"), button:has-text("Continue")').first
+            if accept_btn.is_visible(timeout=3000):
+                accept_btn.click()
+                wordle_page.wait_for_timeout(1000)
+
+            # Target the landing page Play button via data-testid="Play"
+            play_btn = wordle_page.locator('button[data-testid="Play"]').first
+            if not play_btn.is_visible(timeout=2000):
+                play_btn = wordle_page.locator('button:has-text("Play")').first
+
+            if play_btn.is_visible(timeout=3000):
+                print("[NYT Wordle] Clicking landing page Play button...")
+                play_btn.click()
+                wordle_page.wait_for_timeout(1500)
+
+            close_icon = wordle_page.locator('button[aria-label="Close"], button[class*="close"]').first
+            if close_icon.is_visible(timeout=2000):
+                close_icon.click()
+                wordle_page.wait_for_timeout(1000)
+        except Exception as e:
+            print(f"[NYT Wordle] Modal handling warning: {e}")
+
+        solved = False
+
+        for attempt in range(1, max_guesses + 1):
+            guess_word = starter_words[(attempt - 1) % len(starter_words)]
+            print(f"[NYT Wordle] Attempt {attempt}/{max_guesses}: Typing '{guess_word}'...")
+
+            # Type word letters via physical keypress events
+            for char in guess_word:
+                wordle_page.keyboard.press(char)
+                wordle_page.wait_for_timeout(100)
+
+            # Submit guess
+            wordle_page.keyboard.press("Enter")
+            
+            # Wait 3 seconds for flip animations to complete
+            wordle_page.wait_for_timeout(3000)
+
+            # Check if toast or stats modal appears indicating success
+            toast_el = wordle_page.locator('div[class*="Toast-module_toast"]').first
+            if toast_el.is_visible():
+                toast_text = toast_el.inner_text().strip()
+                if any(win_word in toast_text.lower() for win_word in ["genius", "magnificent", "impressive", "splendid", "great", "phew"]):
+                    print(f"[NYT Wordle] Solved puzzle on attempt {attempt}!")
+                    solved = True
+                    break
+
+        # If not solved after max attempts, extract answer from the final toast banner
+        if not solved:
+            print("[NYT Wordle] Guesses exhausted. Extracting answer from toast notification...")
+            wordle_page.wait_for_timeout(2000)
+
+            # Target the toast banner element
+            toast_locator = wordle_page.locator('div[class*="Toast-module_toast"]').first
+            if toast_locator.is_visible(timeout=4000):
+                revealed_answer = toast_locator.inner_text().strip()
+                print(f"[NYT Wordle] Successfully extracted answer from toast: {revealed_answer}")
+            else:
+                # Fallback search for any visible toast module
+                all_toasts = wordle_page.locator('[class*="toast"]').all()
+                for toast in all_toasts:
+                    if toast.is_visible():
+                        revealed_answer = toast.inner_text().strip()
+                        print(f"[NYT Wordle] Extracted answer via fallback toast locator: {revealed_answer}")
+                        break
+
+    except Exception as e:
+        print(f"[NYT Wordle] Error during NYT Wordle execution: {e}")
+    finally:
+        wordle_page.close()
+
+    return revealed_answer
+
+
+def solve_quest_modal_with_worldle_automation(modal, page, browser_context, max_attempts=3):
+    """Detects text inputs inside quest modals, executes direct game interaction for Worldle or Wordle, and inputs the answer."""
+    input_field = modal.locator('input[placeholder*="answer" i], input[type="text"]').first
+    if not input_field.is_visible():
+        return False
+
+    title_el = modal.locator('h1, h2, h3, h4, [class*="title"]').first
+    if title_el.is_visible():
+        quest_prompt = title_el.inner_text().strip()
+    else:
+        quest_prompt = modal.inner_text().split("\n")[0].strip()
+
+    print(f"[Quest Solver] Question detected: '{quest_prompt}'")
+
+    for attempt in range(1, max_attempts + 1):
+        answer = None
+        prompt_lower = quest_prompt.lower()
+
+        # Route to appropriate solver based on prompt keywords
+        if "world-le" in prompt_lower or "worldle" in prompt_lower:
+            answer = solve_worldle_on_site(browser_context)
+        elif "wordle" in prompt_lower:
+            answer = solve_nytimes_wordle_on_site(browser_context)
+
+        if not answer:
+            print("[Quest Solver] Could not retrieve answer via direct site automation.")
+            break
+
+        if "ALL CAPS" in quest_prompt:
+            answer = answer.upper()
+
+        print(f"[Quest Solver] Attempt {attempt}/{max_attempts} retrieved answer: {answer}")
+        
+        input_field.focus()
+        input_field.fill(answer, force=True)
+        page.wait_for_timeout(500)
+
+        submit_btn = modal.locator('button:has-text("Submit"), button[type="submit"]').first
+        if submit_btn.is_visible() and submit_btn.is_enabled():
+            submit_btn.click(force=True)
+            page.wait_for_timeout(2000)
+
+        # Check for error indicators
+        error_mismatch = modal.locator('span:has-text("Key phrase does not match")')
+        error_cooldown = modal.locator('span:has-text("A keyphrase was recently submitted")')
+
+        if error_mismatch.is_visible() or error_cooldown.is_visible():
+            if error_mismatch.is_visible():
+                print(f"[Quest Solver] Answer '{answer}' was rejected by NZXT.")
+            elif error_cooldown.is_visible():
+                print(f"[Quest Solver] Rate limit trigger detected on answer '{answer}'.")
+
+            if attempt < max_attempts:
+                print("[Quest Solver] Waiting 32 seconds for rate limit cooldown before trying again...")
+                page.wait_for_timeout(32000)
+        else:
+            print("[Quest Solver] Answer accepted successfully!")
+            page.wait_for_timeout(1500)
+            return True
+
+    print("[Quest Solver] Max attempts reached or unable to solve quest.")
+    return False
 
 def attempt_login_page(page, email_addr, password):
     """Fills email, triggers ALTCHA captcha, clicks Continue with retry double-checks, and submits password."""
@@ -363,14 +657,9 @@ def attempt_login_page(page, email_addr, password):
                     print(f"[Auto-Login] Attempt {attempt}/{max_retries}: Clicked Continue button.")
                     continue_btn.click(force=True)
                     
-                    # Wait 8 seconds to allow request processing / page transition
                     print("[Auto-Login] Double checking if email field is cleared or 2FA/Password prompt appeared...")
                     page.wait_for_timeout(8000)
 
-                    # Indicators that the continue button succeeded:
-                    # 1. Email input is no longer visible
-                    # 2. Password input is visible
-                    # 3. 2FA verification prompt text or digit inputs appear
                     pass_visible = page.locator('input[type="password"], input[name="password"]').first.is_visible()
                     digit_visible = page.locator('input[aria-label^="Digit "]').first.is_visible()
                     verification_text = page.locator("text=/verify|code|sent an email|check your email/i").count() > 0
@@ -387,7 +676,6 @@ def attempt_login_page(page, email_addr, password):
             else:
                 print("[Auto-Login] Warning: Continue button was not enabled within timeout.")
 
-            # Proceed to Password input if present
             pass_input = page.locator('input[type="password"], input[name="password"]').first
             if pass_input.is_visible():
                 print("[Auto-Login] Entering password...")
@@ -406,7 +694,6 @@ def attempt_login_page(page, email_addr, password):
 
     return False
 
-
 def verify_session_authentication(page, config):
     """Directly navigates to the login page and verifies or performs login."""
     webhook_url = config.get("discord_webhook_url", "").strip()
@@ -418,7 +705,6 @@ def verify_session_authentication(page, config):
     page.goto("https://club.nzxt.com/v2/onboarding/login")
     page.wait_for_timeout(3000)
 
-    # Check if we are actually on a login page by looking for the email input field
     has_email_field = page.locator('input[type="email"], input[name="email"]').count() > 0
     is_onboarding_url = "onboarding" in page.url.lower() or "login" in page.url.lower()
 
@@ -429,13 +715,11 @@ def verify_session_authentication(page, config):
         print("[Auth Check] Already authenticated! Session cookie/profile is active.")
         return
 
-    # Check for 2FA / email verification code prompt
     needs_verification = page.locator("text=/verify|code|sent an email|check your email/i").count() > 0
     if needs_verification:
         print("[Authentication] Email verification prompt detected.")
         handle_verification_code(page, config)
 
-    # Check if still stuck on login or verification
     still_email_field = page.locator('input[type="email"], input[name="email"]').count() > 0
     still_verification = page.locator("text=/verify|code|sent an email|check your email/i").count() > 0
 
@@ -516,8 +800,6 @@ def run_automation():
                 except Exception:
                     pass
 
-                is_discord = "discord-quests" in cat_url
-
                 if "daily-checkin" in cat_url:
                     print("Processing Daily Check-in button...")
                     try:
@@ -525,7 +807,7 @@ def run_automation():
                         if already_checked:
                             print("Daily check-in already completed for today.")
                         else:
-                            check_in_btn = page.locator("button, a").filter(has_text=re.compile(r"^check\s*in$", re.I)).first
+                            check_in_btn = page.get_by_role("button", name="Check in")
                             if check_in_btn.is_visible():
                                 check_in_btn.click()
                                 print("Successfully clicked the 'Check in' button!")
@@ -578,9 +860,10 @@ def run_automation():
 
                         modal = page.locator('div[role="dialog"], [class*="modal"]')
                         if modal.is_visible():
-                            if is_discord:
-                                print("Discord quest detected. Skipping interactive wait...")
-                            else:
+                            # Attempt to auto-solve question input via site interaction automation
+                            solved = solve_quest_modal_with_worldle_automation(modal, page, browser_context)
+
+                            if not solved:
                                 action_btn = modal.locator('a, button').filter(has_text=re.compile(r"open link|start|verify|claim", re.I)).first
                                 if action_btn.is_visible():
                                     print("Clicking action button inside modal...")

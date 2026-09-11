@@ -8,9 +8,10 @@ An automated script built with Python and Playwright to navigate and complete da
 * **Interactive Quest Solvers:** Automates game-based quests including Worldle and NYT Wordle by executing gameplay on site and scraping revealed solutions.
 * **AI Fallback Solver:** Integrates `google-genai` (Gemini API) to dynamically analyze and solve modal quest prompts if automated scraping fails.
 * **Daily Check-In Handling:** Automatically checks in using native role locators to claim daily calendar rewards.
+* **Pucci Points Giveaway Automation:** Automatically enters giveaways starting from the highest affordable entry tier, with a configurable toggle to save or spend points.
 * **Automated Login & 2FA:** Fills account credentials, handles ALTCHA captcha verification, and automatically retrieves 6-digit verification codes via Gmail IMAP.
 * **Auto-Dependency Setup:** Checks and installs missing Python packages (`playwright`, `beautifulsoup4`, `google-genai`) and browser components automatically on launch.
-* **Discord Webhook Alerts:** Sends status notifications to Discord if manual intervention or login verification is needed.
+* **Discord Webhook Alerts & Summaries:** Sends status notifications, daily run summaries, and weekly performance reports directly to Discord.
 * **Timestamped Weekly Logging:** Appends ISO-formatted timestamps to console outputs and writes to a local log file that resets automatically every 7 days.
 * **Persistent Session:** Saves session details in a local browser profile to bypass repeat logins on subsequent runs.
 
@@ -38,7 +39,11 @@ On the first run, the script automatically generates a `config.json` file in the
 
 ```json
 {
+    "spend_pucci_points": true,
     "discord_webhook_url": "YOUR_DISCORD_WEBHOOK_URL",
+    "enable_discord_alerts": true,
+    "enable_weekly_summary": true,
+    "enable_daily_summary": false,
     "account_email": "YOUR_NZXT_EMAIL",
     "account_password": "YOUR_NZXT_PASSWORD",
     "gmail_app_password": "YOUR_GMAIL_APP_PASSWORD",

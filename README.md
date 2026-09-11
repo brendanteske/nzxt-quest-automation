@@ -63,4 +63,3 @@ On the first run, the script automatically generates a `config.json` file in the
 2. The script checks for active authentication. If unauthenticated, it automatically completes the login sequence, solves the captcha, and processes 2FA verification.
 
 3. If manual intervention is required, the script sends an alert to your Discord webhook and waits up to the configured timeout for you to complete login manually before proceeding with quest processing.
-```

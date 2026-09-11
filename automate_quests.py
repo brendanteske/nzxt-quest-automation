@@ -2,6 +2,13 @@ import os
 import sys
 import json
 import subprocess
+import re
+import time
+import imaplib
+import email
+import urllib.request
+import bs4
+from playwright.sync_api import sync_playwright
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -10,83 +17,19 @@ LOG_INFO_PATH = os.path.join(BASE_DIR, "log_info.json")
 USER_DATA_DIR = os.path.join(BASE_DIR, "browser_profile")
 
 DEFAULT_CONFIG = {
+    "spend_pucci_points": True,
     "discord_webhook_url": "",
+    "enable_discord_alerts": True,
+    "enable_weekly_summary": True,
+    "enable_daily_summary": False,
     "account_email": "",
     "account_password": "",
     "gmail_app_password": "",
     "email_sender_filter": "do-not-reply@club.nzxt.com",
-    "gemini_api_key": "",
     "headless_mode": False,
     "login_timeout_minutes": 5,
     "dependencies_installed": False
 }
-
-def setup_weekly_logger():
-    """Manages a rotating log file that resets automatically every 7 days."""
-    import time
-    from datetime import datetime
-
-    current_time = time.time()
-    one_week_seconds = 7 * 24 * 60 * 60
-
-    should_reset = False
-
-    if os.path.exists(LOG_INFO_PATH):
-        try:
-            with open(LOG_INFO_PATH, "r", encoding="utf-8") as f:
-                info = json.load(f)
-                start_time = info.get("created_at", 0)
-                if current_time - start_time >= one_week_seconds:
-                    should_reset = True
-        except Exception:
-            should_reset = True
-    else:
-        should_reset = True
-
-    if should_reset or not os.path.exists(LOG_PATH):
-        with open(LOG_PATH, "w", encoding="utf-8") as f:
-            f.write("--- LOG FILE INITIALIZED (Weekly Auto-Reset Active) ---\n")
-        with open(LOG_INFO_PATH, "w", encoding="utf-8") as f:
-            json.dump({"created_at": current_time}, f, indent=4)
-
-    class Logger(object):
-        def __init__(self):
-            self.terminal = sys.stdout
-            self.log = open(LOG_PATH, "a", encoding="utf-8")
-            self.at_line_start = True
-
-        def write(self, message):
-            if not message:
-                return
-
-            timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
-            
-            # Format multi-line messages or simple strings so timestamps attach to new lines
-            lines = message.split("\n")
-            formatted_message = ""
-
-            for i, line in enumerate(lines):
-                if i > 0:
-                    formatted_message += "\n"
-                    self.at_line_start = True
-                
-                if line:
-                    if self.at_line_start:
-                        formatted_message += timestamp + line
-                        self.at_line_start = False
-                    else:
-                        formatted_message += line
-
-            self.terminal.write(formatted_message)
-            self.log.write(formatted_message)
-            self.log.flush()
-
-        def flush(self):
-            self.terminal.flush()
-            self.log.flush()
-
-    sys.stdout = Logger()
-    sys.stderr = Logger()
 
 def load_or_create_config():
     """Generates config.json if missing, or loads existing configuration."""
@@ -119,6 +62,114 @@ def update_config_key(key, value):
     except Exception as e:
         print(f"[Config] Warning: Failed to update {key} in config.json: {e}")
 
+def send_discord_webhook(webhook_url, title, description, color=15158332):
+    """Sends a formatted notification embed to the configured Discord Webhook."""
+    if not webhook_url or not webhook_url.startswith("http"):
+        return
+
+    payload = {
+        "username": "NZXT Quest Bot",
+        "embeds": [
+            {
+                "title": title,
+                "description": description,
+                "color": color,
+                "footer": {"text": "NZXT Club Automation Alert"}
+            }
+        ]
+    }
+
+    try:
+        req = urllib.request.Request(
+            webhook_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            pass
+    except Exception as e:
+        print(f"[Discord] Failed to send webhook: {e}")
+
+def send_discord_alert(config, title, description):
+    """Wrapper to send error/verification alerts if enabled in config."""
+    if config.get("enable_discord_alerts", True):
+        webhook_url = config.get("discord_webhook_url", "").strip()
+        send_discord_webhook(webhook_url, title, description, color=15158332)
+
+def setup_weekly_logger(config):
+    """Manages a rotating log file that resets automatically every 7 days and triggers weekly summaries."""
+    from datetime import datetime
+
+    current_time = time.time()
+    one_week_seconds = 7 * 24 * 60 * 60
+
+    should_reset = False
+
+    if os.path.exists(LOG_INFO_PATH):
+        try:
+            with open(LOG_INFO_PATH, "r", encoding="utf-8") as f:
+                info = json.load(f)
+                start_time = info.get("created_at", 0)
+                if current_time - start_time >= one_week_seconds:
+                    should_reset = True
+        except Exception:
+            should_reset = True
+    else:
+        should_reset = True
+
+    if should_reset:
+        if os.path.exists(LOG_PATH) and config.get("enable_weekly_summary", True):
+            webhook_url = config.get("discord_webhook_url", "").strip()
+            if webhook_url:
+                send_discord_webhook(
+                    webhook_url,
+                    "📊 Weekly Automation Performance Report",
+                    "Weekly rotation interval reached. Log files have been archived and reset.",
+                    color=3447003
+                )
+
+        with open(LOG_PATH, "w", encoding="utf-8") as f:
+            f.write("--- LOG FILE INITIALIZED (Weekly Auto-Reset Active) ---\n")
+        with open(LOG_INFO_PATH, "w", encoding="utf-8") as f:
+            json.dump({"created_at": current_time}, f, indent=4)
+
+    class Logger(object):
+        def __init__(self):
+            self.terminal = sys.stdout
+            self.log = open(LOG_PATH, "a", encoding="utf-8")
+            self.at_line_start = True
+
+        def write(self, message):
+            if not message:
+                return
+
+            timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
+            lines = message.split("\n")
+            formatted_message = ""
+
+            for i, line in enumerate(lines):
+                if i > 0:
+                    formatted_message += "\n"
+                    self.at_line_start = True
+                
+                if line:
+                    if self.at_line_start:
+                        formatted_message += timestamp + line
+                        self.at_line_start = False
+                    else:
+                        formatted_message += line
+
+            self.terminal.write(formatted_message)
+            self.log.write(formatted_message)
+            self.log.flush()
+
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+
+    sys.stdout = Logger()
+    sys.stderr = Logger()
+
 def verify_and_install_dependencies():
     """Checks dependencies and installs missing ones if dependencies_installed is False."""
     config = load_or_create_config()
@@ -129,8 +180,7 @@ def verify_and_install_dependencies():
     print("[Setup] Checking required dependencies...")
     required_packages = {
         "playwright": "playwright",
-        "bs4": "beautifulsoup4",
-        "google.genai": "google-genai"
+        "bs4": "beautifulsoup4"
     }
 
     missing_packages = []
@@ -160,46 +210,10 @@ def verify_and_install_dependencies():
     update_config_key("dependencies_installed", True)
     print("[Setup] Dependency verification complete. Set dependencies_installed to True in config.json.")
 
-# Initialize weekly logging system and dependencies
-setup_weekly_logger()
+# Initialize configuration, weekly logging, and dependencies
+global_config = load_or_create_config()
+setup_weekly_logger(global_config)
 verify_and_install_dependencies()
-
-# Standard Library & Third-Party Imports
-import re
-import time
-import imaplib
-import email
-import urllib.request
-import bs4
-from playwright.sync_api import sync_playwright
-
-def send_discord_alert(webhook_url, title, description):
-    """Sends a formatted notification embed to the configured Discord Webhook."""
-    if not webhook_url or not webhook_url.startswith("http"):
-        return
-
-    payload = {
-        "username": "NZXT Quest Bot",
-        "embeds": [
-            {
-                "title": title,
-                "description": description,
-                "color": 15158332,
-                "footer": {"text": "NZXT Club Automation Alert"}
-            }
-        ]
-    }
-
-    try:
-        req = urllib.request.Request(
-            webhook_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-        )
-        with urllib.request.urlopen(req) as resp:
-            pass
-    except Exception as e:
-        print(f"[Discord] Failed to send webhook alert: {e}")
 
 def fetch_latest_verification_code(gmail_address, app_password, sender_filter="do-not-reply@club.nzxt.com"):
     """Connects to Gmail via IMAP, finds the latest email from NZXT, and extracts the 6-digit verification code."""
@@ -323,40 +337,8 @@ def handle_verification_code(page, config):
 
     return False
 
-def query_gemini_api(prompt_text, api_key):
-    """Sends a query to Google Gemini API using the official Google GenAI SDK."""
-    if not api_key:
-        print("[Gemini] Skipped: No gemini_api_key set in config.json.")
-        return None
-
-    try:
-        from google import genai
-        
-        client = genai.Client(api_key=api_key)
-        
-        formatted_prompt = (
-            f"Solve this puzzle or question and reply ONLY with the exact answer string. "
-            f"Do not include explanation, punctuation, quotes, or introduction. "
-            f"If ALL CAPS is requested in the prompt, strictly output ALL CAPS. Prompt: '{prompt_text}'"
-        )
-
-        response = client.models.generate_content(
-            model='gemini-3.6-flash',
-            contents=formatted_prompt,
-        )
-        
-        if response.text:
-            return response.text.strip()
-            
-    except Exception as e:
-        print(f"[Gemini API Error] Failed to resolve question: {e}")
-        return None
-
 def solve_worldle_on_site(browser_context, max_guesses=6):
-    """
-    Opens Worldle, repeatedly clicks the randomize dice button and submits guesses.
-    Returns the solved country name or extracts the answer upon game completion.
-    """
+    """Opens Worldle, repeatedly clicks the randomize dice button and submits guesses."""
     print("[Worldle Automation] Navigating to Worldle (teuteuf.fr)...")
     worldle_page = browser_context.new_page()
     revealed_answer = None
@@ -365,7 +347,6 @@ def solve_worldle_on_site(browser_context, max_guesses=6):
         worldle_page.goto("https://worldle.teuteuf.fr/", wait_until="networkidle")
         worldle_page.wait_for_timeout(3000)
 
-        # Handle modal popups or cookies
         try:
             accept_btn = worldle_page.locator('button:has-text("Accept"), button:has-text("Agree")').first
             if accept_btn.is_visible(timeout=3000):
@@ -379,17 +360,14 @@ def solve_worldle_on_site(browser_context, max_guesses=6):
         for attempt in range(1, max_guesses + 1):
             print(f"[Worldle Automation] Executing random guess attempt {attempt}/{max_guesses}...")
 
-            # 1. Click the randomize (dice) button
             dice_btn = worldle_page.locator('[data-testid="dice"]').first
             if dice_btn.is_visible():
                 dice_btn.click(force=True)
             else:
                 worldle_page.locator('div.cursor-pointer:has(svg)').first.click(force=True)
 
-            # Added 3-second delay to allow board animations and input state to fully settle
             worldle_page.wait_for_timeout(3000)
 
-            # 2. Click the Submit 'Guess' button
             guess_btn = worldle_page.locator('button[type="submit"]:has-text("Guess"), button:has([data-testid="PublicRoundedIcon"])').first
             if not guess_btn.is_visible():
                 guess_btn = worldle_page.locator('button[type="submit"]').first
@@ -398,25 +376,21 @@ def solve_worldle_on_site(browser_context, max_guesses=6):
                 guess_btn.click(force=True)
                 worldle_page.wait_for_timeout(2500)
 
-            # Check for win condition text
             victory_text = worldle_page.locator("text=/Splendid|Awesome|Victory|You won/i")
             if victory_text.count() > 0 and victory_text.first.is_visible():
                 print(f"[Worldle Automation] Guessed correctly on attempt {attempt}!")
                 solved = True
                 break
 
-        # If 6 random guesses were spent, scrape the revealed answer banner
         if not solved:
             print("[Worldle Automation] All attempts spent. Extracting revealed country answer from banner...")
             worldle_page.wait_for_timeout(2000)
 
-            # Target the "Country: <span class='font-semibold'>CountryName</span>" element directly
             country_span = worldle_page.locator('span.font-semibold').first
             if country_span.is_visible():
                 revealed_answer = country_span.inner_text().strip()
                 print(f"[Worldle Automation] Successfully extracted answer from banner span: {revealed_answer}")
 
-            # Fallback regex targeting the banner text container directly
             if not revealed_answer:
                 banner_el = worldle_page.locator('div:has-text("Country:")').last
                 if banner_el.is_visible():
@@ -426,7 +400,6 @@ def solve_worldle_on_site(browser_context, max_guesses=6):
                         revealed_answer = match.group(1).strip()
                         print(f"[Worldle Automation] Extracted answer via banner container regex: {revealed_answer}")
 
-            # General body text fallback
             if not revealed_answer:
                 body_text = worldle_page.locator("body").inner_text()
                 match = re.search(r'Country:\s*([A-Za-z\s]+)', body_text, re.I)
@@ -441,31 +414,24 @@ def solve_worldle_on_site(browser_context, max_guesses=6):
 
     return revealed_answer
 
-
 def solve_nytimes_wordle_on_site(browser_context, max_guesses=6):
-    """
-    Navigates to NYT Wordle, submits 5-letter guesses via virtual keyboard,
-    and scrapes the revealed correct answer if all attempts fail.
-    """
+    """Navigates to NYT Wordle and submits guesses to extract answer."""
     print("[NYT Wordle] Navigating to New York Times Wordle...")
     wordle_page = browser_context.new_page()
     revealed_answer = None
 
-    # Sample standard 5-letter starter words for random guessing
     starter_words = ["CRANE", "SLATE", "AUDIO", "RAISE", "SHINE", "GHOST"]
 
     try:
         wordle_page.goto("https://www.nytimes.com/games/wordle/index.html", wait_until="networkidle")
         wordle_page.wait_for_timeout(3000)
 
-        # Handle cookie consent, welcome modals, and landing page play button
         try:
             accept_btn = wordle_page.locator('button:has-text("Accept"), button:has-text("OK"), button:has-text("Continue")').first
             if accept_btn.is_visible(timeout=3000):
                 accept_btn.click()
                 wordle_page.wait_for_timeout(1000)
 
-            # Target the landing page Play button via data-testid="Play"
             play_btn = wordle_page.locator('button[data-testid="Play"]').first
             if not play_btn.is_visible(timeout=2000):
                 play_btn = wordle_page.locator('button:has-text("Play")').first
@@ -488,18 +454,13 @@ def solve_nytimes_wordle_on_site(browser_context, max_guesses=6):
             guess_word = starter_words[(attempt - 1) % len(starter_words)]
             print(f"[NYT Wordle] Attempt {attempt}/{max_guesses}: Typing '{guess_word}'...")
 
-            # Type word letters via physical keypress events
             for char in guess_word:
                 wordle_page.keyboard.press(char)
                 wordle_page.wait_for_timeout(100)
 
-            # Submit guess
             wordle_page.keyboard.press("Enter")
-            
-            # Wait 3 seconds for flip animations to complete
             wordle_page.wait_for_timeout(3000)
 
-            # Check if toast or stats modal appears indicating success
             toast_el = wordle_page.locator('div[class*="Toast-module_toast"]').first
             if toast_el.is_visible():
                 toast_text = toast_el.inner_text().strip()
@@ -508,18 +469,15 @@ def solve_nytimes_wordle_on_site(browser_context, max_guesses=6):
                     solved = True
                     break
 
-        # If not solved after max attempts, extract answer from the final toast banner
         if not solved:
             print("[NYT Wordle] Guesses exhausted. Extracting answer from toast notification...")
             wordle_page.wait_for_timeout(2000)
 
-            # Target the toast banner element
             toast_locator = wordle_page.locator('div[class*="Toast-module_toast"]').first
             if toast_locator.is_visible(timeout=4000):
                 revealed_answer = toast_locator.inner_text().strip()
                 print(f"[NYT Wordle] Successfully extracted answer from toast: {revealed_answer}")
             else:
-                # Fallback search for any visible toast module
                 all_toasts = wordle_page.locator('[class*="toast"]').all()
                 for toast in all_toasts:
                     if toast.is_visible():
@@ -534,9 +492,8 @@ def solve_nytimes_wordle_on_site(browser_context, max_guesses=6):
 
     return revealed_answer
 
-
 def solve_quest_modal_with_worldle_automation(modal, page, browser_context, max_attempts=3):
-    """Detects text inputs inside quest modals, executes direct game interaction for Worldle or Wordle, and inputs the answer."""
+    """Detects text inputs inside quest modals, solves Worldle or Wordle, and inputs the answer."""
     input_field = modal.locator('input[placeholder*="answer" i], input[type="text"]').first
     if not input_field.is_visible():
         return False
@@ -553,7 +510,6 @@ def solve_quest_modal_with_worldle_automation(modal, page, browser_context, max_
         answer = None
         prompt_lower = quest_prompt.lower()
 
-        # Route to appropriate solver based on prompt keywords
         if "world-le" in prompt_lower or "worldle" in prompt_lower:
             answer = solve_worldle_on_site(browser_context)
         elif "wordle" in prompt_lower:
@@ -577,7 +533,6 @@ def solve_quest_modal_with_worldle_automation(modal, page, browser_context, max_
             submit_btn.click(force=True)
             page.wait_for_timeout(2000)
 
-        # Check for error indicators
         error_mismatch = modal.locator('span:has-text("Key phrase does not match")')
         error_cooldown = modal.locator('span:has-text("A keyphrase was recently submitted")')
 
@@ -598,8 +553,109 @@ def solve_quest_modal_with_worldle_automation(modal, page, browser_context, max_
     print("[Quest Solver] Max attempts reached or unable to solve quest.")
     return False
 
+def get_pucci_points_balance(page):
+    """Retrieves Pucci Points balance from sidebar."""
+    try:
+        points_loc = page.locator('div:has-text("Pucci Points") >> xpath=following-sibling::*[1]').first
+        if points_loc.is_visible(timeout=3000):
+            raw_text = points_loc.inner_text().strip()
+            digits = re.sub(r'[^\d]', '', raw_text)
+            if digits:
+                return int(digits)
+    except Exception as e:
+        print(f"[Giveaways] Primary balance locator check failed: {e}")
+
+    try:
+        fallback_loc = page.locator('*:has-text("Pucci Points") + *').first
+        if fallback_loc.is_visible():
+            raw_text = fallback_loc.inner_text().strip()
+            digits = re.sub(r'[^\d]', '', raw_text)
+            if digits:
+                return int(digits)
+    except Exception as e:
+        print(f"[Giveaways] Fallback balance locator check failed: {e}")
+
+    return None
+
+def buy_giveaway_entries(page):
+    """Purchases giveaway entries starting from the highest tier."""
+    print("\n--- Processing Giveaway Entry Purchases ---")
+    print("[Giveaways] Navigating to giveaways page...")
+    page.goto("https://club.nzxt.com/v2/club-giveaways")
+    page.wait_for_timeout(3000)
+
+    try:
+        page.wait_for_selector(".hv2-skeleton", state="detached", timeout=10000)
+    except Exception:
+        pass
+
+    current_points = get_pucci_points_balance(page)
+    if current_points is None:
+        print("[Giveaways] Could not reliably extract Pucci Points balance. Aborting giveaway purchases.")
+        return 0
+
+    print(f"[Giveaways] Current Pucci Points Balance: {current_points:,}")
+
+    purchases_made = 0
+    previous_points = None
+
+    while True:
+        if previous_points is not None and previous_points == current_points:
+            print("[Giveaways] Balance did not decrease after transaction attempt. Stopping giveaway purchasing loop.")
+            break
+
+        previous_points = current_points
+
+        cards = page.locator("div:has(button:has-text('Buy'))").all()
+        available_purchases = []
+
+        for card in cards:
+            card_text = card.inner_text()
+            cost_match = re.search(r"([\d,]+)\s*Pucci\s*Points", card_text, re.IGNORECASE)
+            if cost_match:
+                cost_value = int(cost_match.group(1).replace(",", ""))
+                buy_button = card.locator("button:has-text('Buy')").first
+                
+                if buy_button.is_visible():
+                    available_purchases.append({
+                        "cost": cost_value,
+                        "button": buy_button
+                    })
+
+        if not available_purchases:
+            print("[Giveaways] No purchasable entry cards found on page.")
+            break
+
+        available_purchases.sort(key=lambda x: x["cost"], reverse=True)
+        affordable_purchases = [p for p in available_purchases if current_points >= p["cost"]]
+
+        if not affordable_purchases:
+            min_cost = available_purchases[-1]["cost"]
+            print(f"[Giveaways] No further purchases possible. Remaining balance: {current_points:,} (Minimum required: {min_cost:,}).")
+            break
+
+        target = affordable_purchases[0]
+        print(f"[Giveaways] Pressing the 'Buy' button for the {target['cost']:,} Pucci Points tier...")
+        
+        target["button"].click(force=True)
+        print("[Giveaways] Waiting 5 seconds and refreshing page for point balance update...")
+        page.wait_for_timeout(5000)
+        page.reload()
+        page.wait_for_timeout(3000)
+        purchases_made += 1
+
+        updated_points = get_pucci_points_balance(page)
+        if updated_points is not None:
+            current_points = updated_points
+            print(f"[Giveaways] Updated Balance: {current_points:,}")
+        else:
+            current_points -= target["cost"]
+
+    print(f"[Giveaways] Finished entry purchases. Total entries bought this run: {purchases_made}")
+    return purchases_made
+
 def attempt_login_page(page, email_addr, password):
-    """Fills email, triggers ALTCHA captcha, clicks Continue with retry double-checks, and submits password."""
+    """Fills login credentials and ALTCHA captcha."""
     if not email_addr or not password:
         print("[Auto-Login] Missing email or password in config.json. Automatic login skipped.")
         return False
@@ -695,8 +751,7 @@ def attempt_login_page(page, email_addr, password):
     return False
 
 def verify_session_authentication(page, config):
-    """Directly navigates to the login page and verifies or performs login."""
-    webhook_url = config.get("discord_webhook_url", "").strip()
+    """Navigates to login page and checks authentication status."""
     account_email = config.get("account_email", "").strip()
     account_password = config.get("account_password", "").strip()
     timeout_mins = config.get("login_timeout_minutes", 5)
@@ -729,7 +784,7 @@ def verify_session_authentication(page, config):
         print("!"*60 + "\n")
         
         send_discord_alert(
-            webhook_url,
+            config,
             "⚠️ NZXT Verification Required",
             f"Auto-login failed or captcha/2FA required. Please complete login manually. Waiting up to **{timeout_mins} minutes**."
         )
@@ -745,7 +800,7 @@ def verify_session_authentication(page, config):
             if "onboarding" not in curr_url and "login" not in curr_url and no_email_input:
                 authenticated = True
                 print("\n[+] Session successfully authenticated! Proceeding to automation...\n")
-                send_discord_alert(webhook_url, "✅ NZXT Club Authenticated", "Authentication successful. Proceeding with quests.")
+                send_discord_alert(config, "✅ NZXT Club Authenticated", "Authentication successful. Proceeding with quests.")
                 break
 
         if not authenticated:
@@ -788,6 +843,9 @@ def run_automation():
 
         print("\n--- Persistent Session Active: Starting Quest Processing ---")
 
+        quests_completed_count = 0
+        checkin_completed = False
+
         # Phase 2: Quest processing logic
         try:
             for cat_url in quest_categories:
@@ -806,11 +864,14 @@ def run_automation():
                         already_checked = page.locator("text=/Checked in for today/i").count() > 0
                         if already_checked:
                             print("Daily check-in already completed for today.")
+                            checkin_completed = True
                         else:
                             check_in_btn = page.get_by_role("button", name="Check in")
                             if check_in_btn.is_visible():
                                 check_in_btn.click()
                                 print("Successfully clicked the 'Check in' button!")
+                                quests_completed_count += 1
+                                checkin_completed = True
                                 page.wait_for_timeout(3000)
                             else:
                                 print("No active 'Check in' button found.")
@@ -860,7 +921,6 @@ def run_automation():
 
                         modal = page.locator('div[role="dialog"], [class*="modal"]')
                         if modal.is_visible():
-                            # Attempt to auto-solve question input via site interaction automation
                             solved = solve_quest_modal_with_worldle_automation(modal, page, browser_context)
 
                             if not solved:
@@ -886,6 +946,7 @@ def run_automation():
                             else:
                                 page.keyboard.press("Escape")
                             
+                            quests_completed_count += 1
                             page.wait_for_timeout(1000)
 
                     except Exception as e:
@@ -895,7 +956,44 @@ def run_automation():
                 if unclaimed_count == 0:
                     print("All quests in this category are already claimed.")
 
-            print("\nAll categories processed successfully!")
+            print(f"\nAll categories processed. Total completed actions this run: {quests_completed_count}")
+            
+            # Phase 3: Giveaway entries purchase logic (with spend/save toggle)
+            should_spend = config.get("spend_pucci_points", True)
+            entries_bought = 0
+            
+            if should_spend:
+                print("\n[Giveaways] Configuration set to SPEND points. Checking balance for entry purchases...")
+                current_points = get_pucci_points_balance(page)
+                
+                if current_points is not None and current_points >= 1000:
+                    print(f"[Giveaways] Balance: {current_points:,} pts. Proceeding to entry purchases...")
+                    entries_bought = buy_giveaway_entries(page)
+                else:
+                    pts_str = f"{current_points:,}" if current_points is not None else "Unknown"
+                    print(f"[Giveaways] Balance ({pts_str}) is below the minimum required tier (1,000 pts). Skipping purchases.")
+            else:
+                print("\n[Giveaways] Configuration set to SAVE points (`spend_pucci_points`: false). Skipping entry purchases.")
+
+            # Phase 4: Daily summary trigger if enabled
+            if config.get("enable_daily_summary", False):
+                webhook_url = config.get("discord_webhook_url", "").strip()
+                if webhook_url:
+                    final_points = get_pucci_points_balance(page)
+                    pts_display = f"{final_points:,}" if final_points is not None else "Unknown"
+                    summary_text = (
+                        f"**Daily Check-In:** {'Completed' if checkin_completed else 'Skipped/Already Claimed'}\n"
+                        f"**Quests Processed:** {quests_completed_count} Claimed\n"
+                        f"**Giveaway Mode:** {'Spending Points' if should_spend else 'Saving Points'}\n"
+                        f"**Giveaway Entries Purchased:** {entries_bought}\n"
+                        f"**Current Pucci Points Balance:** {pts_display} pts"
+                    )
+                    send_discord_webhook(
+                        webhook_url,
+                        "📋 Daily Quest & Automation Summary",
+                        summary_text,
+                        color=3066993
+                    )
 
         except KeyboardInterrupt:
             print("\n[Automation stopped safely by user via Ctrl + C]")

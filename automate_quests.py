@@ -578,7 +578,7 @@ def get_pucci_points_balance(page):
     return None
 
 def buy_giveaway_entries(page):
-    """Purchases giveaway entries starting from the highest tier."""
+    """Purchases giveaway entries starting from the highest tier and calculates total entries based on points spent."""
     print("\n--- Processing Giveaway Entry Purchases ---")
     print("[Giveaways] Navigating to giveaways page...")
     page.goto("https://club.nzxt.com/v2/club-giveaways")
@@ -596,7 +596,7 @@ def buy_giveaway_entries(page):
 
     print(f"[Giveaways] Current Pucci Points Balance: {current_points:,}")
 
-    purchases_made = 0
+    total_entries_bought = 0
     previous_points = None
 
     while True:
@@ -606,21 +606,32 @@ def buy_giveaway_entries(page):
 
         previous_points = current_points
 
-        cards = page.locator("div:has(button:has-text('Buy'))").all()
+        cards = page.locator("div:has(button)").all()
         available_purchases = []
 
         for card in cards:
-            card_text = card.inner_text()
-            cost_match = re.search(r"([\d,]+)\s*Pucci\s*Points", card_text, re.IGNORECASE)
-            if cost_match:
-                cost_value = int(cost_match.group(1).replace(",", ""))
-                buy_button = card.locator("button:has-text('Buy')").first
-                
-                if buy_button.is_visible():
-                    available_purchases.append({
-                        "cost": cost_value,
-                        "button": buy_button
-                    })
+            try:
+                card_text = card.inner_text()
+                if "Pucci Points" not in card_text:
+                    continue
+
+                cost_match = re.search(r"([\d,]+)\s*Pucci\s*Points", card_text, re.IGNORECASE)
+                if cost_match:
+                    cost_value = int(cost_match.group(1).replace(",", ""))
+                    buy_button = card.locator("button:has-text('Buy')").first
+                    
+                    if buy_button.is_visible() and buy_button.is_enabled():
+                        available_purchases.append({
+                            "cost": cost_value,
+                            "button": buy_button
+                        })
+            except Exception:
+                continue
+
+        unique_purchases = {}
+        for p in available_purchases:
+            unique_purchases[p["cost"]] = p
+        available_purchases = list(unique_purchases.values())
 
         if not available_purchases:
             print("[Giveaways] No purchasable entry cards found on page.")
@@ -631,18 +642,20 @@ def buy_giveaway_entries(page):
 
         if not affordable_purchases:
             min_cost = available_purchases[-1]["cost"]
-            print(f"[Giveaways] No further purchases possible. Remaining balance: {current_points:,} (Minimum required: {min_cost:,}).")
+            print(f"[Giveaways] No further purchases possible. Remaining balance: {current_points:,} (Minimum required tier: {min_cost:,}).")
             break
 
         target = affordable_purchases[0]
-        print(f"[Giveaways] Pressing the 'Buy' button for the {target['cost']:,} Pucci Points tier...")
+        entries_gained = target["cost"] // 100
+        print(f"[Giveaways] Pressing the 'Buy' button for the {target['cost']:,} Pucci Points tier ({entries_gained} entries)...")
         
         target["button"].click(force=True)
         print("[Giveaways] Waiting 5 seconds and refreshing page for point balance update...")
         page.wait_for_timeout(5000)
         page.reload()
         page.wait_for_timeout(3000)
-        purchases_made += 1
+        
+        total_entries_bought += entries_gained
 
         updated_points = get_pucci_points_balance(page)
         if updated_points is not None:
@@ -651,8 +664,8 @@ def buy_giveaway_entries(page):
         else:
             current_points -= target["cost"]
 
-    print(f"[Giveaways] Finished entry purchases. Total entries bought this run: {purchases_made}")
-    return purchases_made
+    print(f"[Giveaways] Finished entry purchases. Total entries bought this run: {total_entries_bought}")
+    return total_entries_bought
 
 def attempt_login_page(page, email_addr, password):
     """Fills login credentials and ALTCHA captcha."""

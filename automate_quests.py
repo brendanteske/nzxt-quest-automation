@@ -8,6 +8,7 @@ import imaplib
 import email
 import urllib.request
 import bs4
+from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -74,7 +75,7 @@ def send_discord_webhook(webhook_url, title, description, color=15158332):
                 "title": title,
                 "description": description,
                 "color": color,
-                "footer": {"text": "NZXT Club Automation Alert"}
+                "footer": {"text": "NZXT Club Automation v7"}
             }
         ]
     }
@@ -98,8 +99,6 @@ def send_discord_alert(config, title, description):
 
 def setup_weekly_logger(config):
     """Manages a rotating log file that resets automatically every 7 days and triggers weekly summaries."""
-    from datetime import datetime
-
     current_time = time.time()
     one_week_seconds = 7 * 24 * 60 * 60
 
@@ -650,9 +649,14 @@ def buy_giveaway_entries(page):
         print(f"[Giveaways] Pressing the 'Buy' button for the {target['cost']:,} Pucci Points tier ({entries_gained} entries)...")
         
         target["button"].click(force=True)
-        print("[Giveaways] Waiting 5 seconds and refreshing page for point balance update...")
+        print("[Giveaways] Waiting 5 seconds and reloading page for point balance update...")
         page.wait_for_timeout(5000)
-        page.reload()
+        
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            print("[Giveaways] Reload took longer than expected, continuing execution...")
+            
         page.wait_for_timeout(3000)
         
         total_entries_bought += entries_gained
@@ -820,9 +824,42 @@ def verify_session_authentication(page, config):
             print("[-] Login timeout reached without successful authentication. Exiting script.")
             sys.exit(1)
 
-def run_automation():
-    config = load_or_create_config()
-    
+def check_quest_date_matches_today(page):
+    """Checks if daily Discord quests (Wordle/Worldle) match today's date string."""
+    print("[Scheduler] Checking if daily Discord quests have rolled over to today...")
+    page.goto("https://club.nzxt.com/v2/discord-quests")
+    page.wait_for_timeout(3000)
+
+    try:
+        page.wait_for_selector(".hv2-skeleton", state="detached", timeout=10000)
+    except Exception:
+        pass
+
+    today_str = datetime.now().strftime("%B %d")
+    print(f"[Scheduler] Looking for quest labels containing: '{today_str}'")
+
+    try:
+        quest_elements = page.locator("a[aria-label*='Wordle'], a[aria-label*='WORLD-le']").all()
+        
+        if not quest_elements:
+            print("[Scheduler] Could not find quest elements to verify date.")
+            return True
+
+        found_today = False
+        for el in quest_elements:
+            label = el.get_attribute("aria-label") or ""
+            print(f"[Scheduler] Found quest label: {label}")
+            if today_str in label:
+                found_today = True
+                break
+
+        return found_today
+    except Exception as e:
+        print(f"[Scheduler] Error checking quest dates: {e}")
+        return True
+
+def run_core_automation(page, browser_context, config):
+    """Executes the core quest completion and giveaway purchasing logic."""
     quest_categories = [
         "https://club.nzxt.com/v2/nzxt-club-quests/daily-checkin",
         "https://club.nzxt.com/v2/nzxt-club-quests/x-twitter-quests",
@@ -834,187 +871,224 @@ def run_automation():
         "https://club.nzxt.com/v2/nzxt-club-quests/twitch-quests",
         "https://club.nzxt.com/v2/nzxt-club-quests/discord-quests"
     ]
-    
-    with sync_playwright() as p:
-        print("Launching Google Chrome...")
-        browser_context = p.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
-            channel="chrome",
-            headless=config.get("headless_mode", False),
-            viewport={"width": 1510, "height": 1232},
-            ignore_default_args=["--enable-automation"],
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--test-type"
-            ]
-        )
+
+    print("\n--- Persistent Session Active: Starting Quest Processing ---")
+
+    quests_completed_count = 0
+    checkin_completed = False
+
+    for cat_url in quest_categories:
+        print(f"\nNavigating to category: {cat_url}")
+        page.goto(cat_url)
         
-        page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
-
-        # Phase 1: Authentication logic
-        verify_session_authentication(page, config)
-
-        print("\n--- Persistent Session Active: Starting Quest Processing ---")
-
-        quests_completed_count = 0
-        checkin_completed = False
-
-        # Phase 2: Quest processing logic
+        page.wait_for_timeout(3000)
         try:
-            for cat_url in quest_categories:
-                print(f"\nNavigating to category: {cat_url}")
-                page.goto(cat_url)
-                
-                page.wait_for_timeout(3000)
+            page.wait_for_selector(".hv2-skeleton", state="detached", timeout=10000)
+        except Exception:
+            pass
+
+        if "daily-checkin" in cat_url:
+            print("Processing Daily Check-in button...")
+            try:
+                already_checked = page.locator("text=/Checked in for today/i").count() > 0
+                if already_checked:
+                    print("Daily check-in already completed for today.")
+                    checkin_completed = True
+                else:
+                    check_in_btn = page.get_by_role("button", name="Check in")
+                    if check_in_btn.is_visible():
+                        check_in_btn.click()
+                        print("Successfully clicked the 'Check in' button!")
+                        quests_completed_count += 1
+                        checkin_completed = True
+                        page.wait_for_timeout(3000)
+                    else:
+                        print("No active 'Check in' button found.")
+            except Exception as e:
+                print(f"Skipped daily check-in interaction due to: {e}")
+            continue
+
+        try:
+            page.wait_for_selector('a[href*="?d=quest:"]', timeout=10000)
+        except Exception:
+            print("No quest links found on page.")
+            continue
+
+        quest_links = page.locator('a[href*="?d=quest:"]').all()
+        print(f"Found {len(quest_links)} total quest links on page.")
+
+        unclaimed_count = 0
+        for link in quest_links:
+            try:
+                is_claimed = link.evaluate("""el => {
+                    let card = el.closest('div[style*="border"], div[class*="card"], li, div[data-block-type]') || el.parentElement;
+                    if (!card) card = el;
+
+                    const cardText = (card.innerText || '').toUpperCase();
+                    if (cardText.includes('CLAIMED')) return true;
+
+                    const hasCheckIcon = card.querySelector('.fa-check, i[class*="check"], svg[class*="check"]') !== null;
+                    if (hasCheckIcon) return true;
+
+                    const spans = Array.from(card.querySelectorAll('span'));
+                    const hasAccentCircle = spans.some(s => s.getAttribute('style') && s.getAttribute('style').includes('var(--hv2-color-accent)'));
+                    if (hasAccentCircle) return true;
+
+                    return false;
+                }""")
+
+                if is_claimed:
+                    continue
+
+                unclaimed_count += 1
+                href = link.get_attribute("href")
+                print(f"Opening unclaimed quest: {href}")
+
+                link.scroll_into_view_if_needed()
+                link.click()
+                page.wait_for_timeout(1500)
+
+                modal = page.locator('div[role="dialog"], [class*="modal"]')
+                if modal.is_visible():
+                    solved = solve_quest_modal_with_worldle_automation(modal, page, browser_context)
+
+                    if not solved:
+                        action_btn = modal.locator('a, button').filter(has_text=re.compile(r"open link|start|verify|claim", re.I)).first
+                        if action_btn.is_visible():
+                            print("Clicking action button inside modal...")
+                            try:
+                                with browser_context.expect_page(timeout=4000) as new_page_info:
+                                    action_btn.click()
+                                
+                                new_tab = new_page_info.value
+                                new_tab.wait_for_load_state()
+                                new_tab.close()
+                                print("Closed external tab.")
+                            except Exception:
+                                pass
+
+                        page.wait_for_timeout(2000)
+
+                    close_btn = modal.locator('button:has(.fa-xmark), button:has(.fa-times), button[aria-label="Close"], button.modal-close').first
+                    if close_btn.is_visible():
+                        close_btn.click()
+                    else:
+                        page.keyboard.press("Escape")
+                    
+                    quests_completed_count += 1
+                    page.wait_for_timeout(1000)
+
+            except Exception as e:
+                print(f"Error processing quest item: {e}")
+                continue
+
+        if unclaimed_count == 0:
+            print("All quests in this category are already claimed.")
+
+    print(f"\nAll categories processed. Total completed actions this run: {quests_completed_count}")
+    
+    should_spend = config.get("spend_pucci_points", True)
+    entries_bought = 0
+    
+    if should_spend:
+        print("\n[Giveaways] Configuration set to SPEND points. Checking balance for entry purchases...")
+        current_points = get_pucci_points_balance(page)
+        
+        if current_points is not None and current_points >= 1000:
+            print(f"[Giveaways] Balance: {current_points:,} pts. Proceeding to entry purchases...")
+            entries_bought = buy_giveaway_entries(page)
+        else:
+            pts_str = f"{current_points:,}" if current_points is not None else "Unknown"
+            print(f"[Giveaways] Balance ({pts_str}) is below the minimum required tier (1,000 pts). Skipping purchases.")
+    else:
+        print("\n[Giveaways] Configuration set to SAVE points (`spend_pucci_points`: false). Skipping entry purchases.")
+
+    if config.get("enable_daily_summary", False):
+        webhook_url = config.get("discord_webhook_url", "").strip()
+        if webhook_url:
+            final_points = get_pucci_points_balance(page)
+            pts_display = f"{final_points:,}" if final_points is not None else "Unknown"
+            summary_text = (
+                f"**Daily Check-In:** {'Completed' if checkin_completed else 'Skipped/Already Claimed'}\n"
+                f"**Quests Processed:** {quests_completed_count} Claimed\n"
+                f"**Giveaway Mode:** {'Spending Points' if should_spend else 'Saving Points'}\n"
+                f"**Giveaway Entries Purchased:** {entries_bought}\n"
+                f"**Current Pucci Points Balance:** {pts_display} pts"
+            )
+            send_discord_webhook(
+                webhook_url,
+                "📋 Daily Quest & Automation Summary v7",
+                summary_text,
+                color=3066993
+            )
+
+def run_automation():
+    """Wrapper that runs automation with date check and 15-minute retry intervals."""
+    config = load_or_create_config()
+    max_retries = 4
+    retry_delay_minutes = 15
+    attempt = 0
+
+    while attempt < max_retries:
+        attempt += 1
+        print(f"\n[Scheduler] === Automation Run Attempt {attempt} of {max_retries} ===")
+        
+        with sync_playwright() as p:
+            print("Launching Google Chrome...")
+            browser_context = p.chromium.launch_persistent_context(
+                user_data_dir=USER_DATA_DIR,
+                channel="chrome",
+                headless=config.get("headless_mode", False),
+                viewport={"width": 1510, "height": 1232},
+                ignore_default_args=["--enable-automation"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--test-type"
+                ]
+            )
+            
+            page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+
+            try:
+                verify_session_authentication(page, config)
+
+                if not check_quest_date_matches_today(page):
+                    print(f"[Scheduler] Quests are still showing the previous day's date.")
+                    if attempt < max_retries:
+                        print(f"[Scheduler] Closing browser and waiting {retry_delay_minutes} minutes for rollover...")
+                        try:
+                            browser_context.close()
+                        except Exception:
+                            pass
+                        
+                        time.sleep(retry_delay_minutes * 60)
+                        continue
+                    else:
+                        print("[Scheduler] Max retries reached. Proceeding with available quests anyway.")
+
+                run_core_automation(page, browser_context, config)
+                break
+
+            except KeyboardInterrupt:
+                print("\n[Automation stopped safely by user via Ctrl + C]")
+                break
+            except Exception as e:
+                print(f"[Scheduler] Exception encountered during run attempt {attempt}: {e}")
+                if attempt < max_retries:
+                    print(f"[Scheduler] Retrying in {retry_delay_minutes} minutes...")
+                    try:
+                        browser_context.close()
+                    except Exception:
+                        pass
+                    time.sleep(retry_delay_minutes * 60)
+                    continue
+                else:
+                    raise
+            finally:
                 try:
-                    page.wait_for_selector(".hv2-skeleton", state="detached", timeout=10000)
+                    browser_context.close()
                 except Exception:
                     pass
-
-                if "daily-checkin" in cat_url:
-                    print("Processing Daily Check-in button...")
-                    try:
-                        already_checked = page.locator("text=/Checked in for today/i").count() > 0
-                        if already_checked:
-                            print("Daily check-in already completed for today.")
-                            checkin_completed = True
-                        else:
-                            check_in_btn = page.get_by_role("button", name="Check in")
-                            if check_in_btn.is_visible():
-                                check_in_btn.click()
-                                print("Successfully clicked the 'Check in' button!")
-                                quests_completed_count += 1
-                                checkin_completed = True
-                                page.wait_for_timeout(3000)
-                            else:
-                                print("No active 'Check in' button found.")
-                    except Exception as e:
-                        print(f"Skipped daily check-in interaction due to: {e}")
-                    continue
-
-                try:
-                    page.wait_for_selector('a[href*="?d=quest:"]', timeout=10000)
-                except Exception:
-                    print("No quest links found on page.")
-                    continue
-
-                quest_links = page.locator('a[href*="?d=quest:"]').all()
-                print(f"Found {len(quest_links)} total quest links on page.")
-
-                unclaimed_count = 0
-                for link in quest_links:
-                    try:
-                        is_claimed = link.evaluate("""el => {
-                            let card = el.closest('div[style*="border"], div[class*="card"], li, div[data-block-type]') || el.parentElement;
-                            if (!card) card = el;
-
-                            const cardText = (card.innerText || '').toUpperCase();
-                            if (cardText.includes('CLAIMED')) return true;
-
-                            const hasCheckIcon = card.querySelector('.fa-check, i[class*="check"], svg[class*="check"]') !== null;
-                            if (hasCheckIcon) return true;
-
-                            const spans = Array.from(card.querySelectorAll('span'));
-                            const hasAccentCircle = spans.some(s => s.getAttribute('style') && s.getAttribute('style').includes('var(--hv2-color-accent)'));
-                            if (hasAccentCircle) return true;
-
-                            return false;
-                        }""")
-
-                        if is_claimed:
-                            continue
-
-                        unclaimed_count += 1
-                        href = link.get_attribute("href")
-                        print(f"Opening unclaimed quest: {href}")
-
-                        link.scroll_into_view_if_needed()
-                        link.click()
-                        page.wait_for_timeout(1500)
-
-                        modal = page.locator('div[role="dialog"], [class*="modal"]')
-                        if modal.is_visible():
-                            solved = solve_quest_modal_with_worldle_automation(modal, page, browser_context)
-
-                            if not solved:
-                                action_btn = modal.locator('a, button').filter(has_text=re.compile(r"open link|start|verify|claim", re.I)).first
-                                if action_btn.is_visible():
-                                    print("Clicking action button inside modal...")
-                                    try:
-                                        with browser_context.expect_page(timeout=4000) as new_page_info:
-                                            action_btn.click()
-                                        
-                                        new_tab = new_page_info.value
-                                        new_tab.wait_for_load_state()
-                                        new_tab.close()
-                                        print("Closed external tab.")
-                                    except Exception:
-                                        pass
-
-                                page.wait_for_timeout(2000)
-
-                            close_btn = modal.locator('button:has(.fa-xmark), button:has(.fa-times), button[aria-label="Close"], button.modal-close').first
-                            if close_btn.is_visible():
-                                close_btn.click()
-                            else:
-                                page.keyboard.press("Escape")
-                            
-                            quests_completed_count += 1
-                            page.wait_for_timeout(1000)
-
-                    except Exception as e:
-                        print(f"Error processing quest item: {e}")
-                        continue
-
-                if unclaimed_count == 0:
-                    print("All quests in this category are already claimed.")
-
-            print(f"\nAll categories processed. Total completed actions this run: {quests_completed_count}")
-            
-            # Phase 3: Giveaway entries purchase logic (with spend/save toggle)
-            should_spend = config.get("spend_pucci_points", True)
-            entries_bought = 0
-            
-            if should_spend:
-                print("\n[Giveaways] Configuration set to SPEND points. Checking balance for entry purchases...")
-                current_points = get_pucci_points_balance(page)
-                
-                if current_points is not None and current_points >= 1000:
-                    print(f"[Giveaways] Balance: {current_points:,} pts. Proceeding to entry purchases...")
-                    entries_bought = buy_giveaway_entries(page)
-                else:
-                    pts_str = f"{current_points:,}" if current_points is not None else "Unknown"
-                    print(f"[Giveaways] Balance ({pts_str}) is below the minimum required tier (1,000 pts). Skipping purchases.")
-            else:
-                print("\n[Giveaways] Configuration set to SAVE points (`spend_pucci_points`: false). Skipping entry purchases.")
-
-            # Phase 4: Daily summary trigger if enabled
-            if config.get("enable_daily_summary", False):
-                webhook_url = config.get("discord_webhook_url", "").strip()
-                if webhook_url:
-                    final_points = get_pucci_points_balance(page)
-                    pts_display = f"{final_points:,}" if final_points is not None else "Unknown"
-                    summary_text = (
-                        f"**Daily Check-In:** {'Completed' if checkin_completed else 'Skipped/Already Claimed'}\n"
-                        f"**Quests Processed:** {quests_completed_count} Claimed\n"
-                        f"**Giveaway Mode:** {'Spending Points' if should_spend else 'Saving Points'}\n"
-                        f"**Giveaway Entries Purchased:** {entries_bought}\n"
-                        f"**Current Pucci Points Balance:** {pts_display} pts"
-                    )
-                    send_discord_webhook(
-                        webhook_url,
-                        "📋 Daily Quest & Automation Summary",
-                        summary_text,
-                        color=3066993
-                    )
-
-        except KeyboardInterrupt:
-            print("\n[Automation stopped safely by user via Ctrl + C]")
-        finally:
-            try:
-                browser_context.close()
-            except Exception:
-                pass
 
 if __name__ == "__main__":
     run_automation()

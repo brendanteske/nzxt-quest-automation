@@ -6,6 +6,7 @@ An automated script built with Python and Playwright to navigate and complete da
 
 * **Automated Navigation:** Automatically loops through multiple quest categories (including X, Facebook, Instagram, TikTok, Reddit, YouTube, Twitch, and Discord) to open and complete available quests.
 * **Interactive Quest Solvers:** Automates game-based quests including Worldle and NYT Wordle by executing gameplay on site and scraping revealed solutions.
+* **Smart Quest Date Validation:** Automatically checks if Discord Wordle and Worldle quests have rolled over to today's date, executing 15-minute retry intervals (up to 4 attempts) with clean browser shutdowns if they still display yesterday's date.
 * **Daily Check-In Handling:** Automatically checks in using native role locators to claim daily calendar rewards.
 * **Pucci Points Giveaway Automation:** Automatically purchases entries starting from the highest affordable tier, dynamically validating active buttons and calculating total entries won based on points spent.
 * **Automated Login & 2FA:** Fills account credentials, handles ALTCHA captcha verification, and automatically retrieves 6-digit verification codes via Gmail IMAP.
@@ -25,7 +26,6 @@ An automated script built with Python and Playwright to navigate and complete da
    ```bash
    git clone [https://github.com/brendanteske/nzxt-quest-automation.git](https://github.com/brendanteske/nzxt-quest-automation.git)
    cd nzxt-quest-automation
-   ```
 
 2. Run the script (dependencies will be verified and installed automatically):
    ```bash
@@ -62,7 +62,9 @@ On the first run, the script automatically generates a `config.json` file in the
 
 2. The script checks for active authentication. If unauthenticated, it automatically completes the login sequence, solves the captcha, and processes 2FA verification.
 
-3. If manual intervention is required, the script sends an alert to your Discord webhook and waits up to the configured timeout for you to complete login manually before proceeding with quest processing.
+3. The scheduler verifies that daily quests have rolled over to the current date, pausing safely for 15-minute intervals if necessary before executing quest processing and giveaway entry purchases.
+
+4. If manual intervention is required, the script sends an alert to your Discord webhook and waits up to the configured timeout for you to complete login manually before proceeding with quest processing.
 
 
 ---

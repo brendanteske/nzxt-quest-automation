@@ -98,7 +98,7 @@ def send_discord_alert(config, title, description):
         send_discord_webhook(webhook_url, title, description, color=15158332)
 
 def setup_weekly_logger(config):
-    """Manages a rotating log file that resets automatically every 7 days and triggers weekly summaries."""
+    """Manages a rotating log file that resets automatically every 7 days and triggers detailed weekly summaries."""
     current_time = time.time()
     one_week_seconds = 7 * 24 * 60 * 60
 
@@ -120,10 +120,31 @@ def setup_weekly_logger(config):
         if os.path.exists(LOG_PATH) and config.get("enable_weekly_summary", True):
             webhook_url = config.get("discord_webhook_url", "").strip()
             if webhook_url:
+                quest_claims = 0
+                giveaway_purchases = 0
+                errors_logged = 0
+                
+                try:
+                    with open(LOG_PATH, "r", encoding="utf-8") as log_file:
+                        log_content = log_file.read()
+                        quest_claims = log_content.count("Successfully clicked") + log_content.count("Claimed")
+                        giveaway_purchases = log_content.count("Pressing the 'Buy' button")
+                        errors_logged = log_content.count("Error") + log_content.count("Exception")
+                except Exception:
+                    pass
+
+                summary_description = (
+                    f"**Weekly Rotation Interval Reached**\n\n"
+                    f"* **Estimated Quests Completed:** {quest_claims}\n"
+                    f"* **Giveaway Purchase Tiers Run:** {giveaway_purchases}\n"
+                    f"* **Errors/Exceptions Caught:** {errors_logged}\n\n"
+                    f"Log files have been archived and reset for the new week."
+                )
+
                 send_discord_webhook(
                     webhook_url,
                     "📊 Weekly Automation Performance Report",
-                    "Weekly rotation interval reached. Log files have been archived and reset.",
+                    summary_description,
                     color=3447003
                 )
 
@@ -506,48 +527,73 @@ def solve_quest_modal_with_worldle_automation(modal, page, browser_context, max_
     print(f"[Quest Solver] Question detected: '{quest_prompt}'")
 
     for attempt in range(1, max_attempts + 1):
-        answer = None
+        raw_answer = None
         prompt_lower = quest_prompt.lower()
 
         if "world-le" in prompt_lower or "worldle" in prompt_lower:
-            answer = solve_worldle_on_site(browser_context)
+            raw_answer = solve_worldle_on_site(browser_context)
         elif "wordle" in prompt_lower:
-            answer = solve_nytimes_wordle_on_site(browser_context)
+            raw_answer = solve_nytimes_wordle_on_site(browser_context)
 
-        if not answer:
+        if not raw_answer:
             print("[Quest Solver] Could not retrieve answer via direct site automation.")
             break
 
         if "ALL CAPS" in quest_prompt:
-            answer = answer.upper()
+            raw_answer = raw_answer.upper()
 
-        print(f"[Quest Solver] Attempt {attempt}/{max_attempts} retrieved answer: {answer}")
+        # Build candidate answers list: try without dash/hyphen variants first if applicable
+        candidates = []
         
-        input_field.focus()
-        input_field.fill(answer, force=True)
-        page.wait_for_timeout(500)
+        # If it's attempt 1 and contains a hyphen/dash, prioritize the no-dash or space-replaced version
+        if attempt == 1:
+            if "-" in raw_answer:
+                candidates.append(raw_answer.replace("-", " "))
+                candidates.append(raw_answer.replace("-", ""))
+            elif "–" in raw_answer: # En-dash fallback
+                candidates.append(raw_answer.replace("–", " "))
+                candidates.append(raw_answer.replace("–", ""))
+        
+        # Always include the exact raw answer as a candidate
+        candidates.append(raw_answer)
+        
+        # Deduplicate while preserving order
+        seen = set()
+        unique_candidates = [c for c in candidates if not (c in seen or seen.add(c))]
 
-        submit_btn = modal.locator('button:has-text("Submit"), button[type="submit"]').first
-        if submit_btn.is_visible() and submit_btn.is_enabled():
-            submit_btn.click(force=True)
-            page.wait_for_timeout(2000)
+        solved_successfully = False
+        for answer in unique_candidates:
+            print(f"[Quest Solver] Attempt {attempt}/{max_attempts} trying answer variant: {answer}")
+            
+            input_field.focus()
+            input_field.fill(answer, force=True)
+            page.wait_for_timeout(500)
 
-        error_mismatch = modal.locator('span:has-text("Key phrase does not match")')
-        error_cooldown = modal.locator('span:has-text("A keyphrase was recently submitted")')
+            submit_btn = modal.locator('button:has-text("Submit"), button[type="submit"]').first
+            if submit_btn.is_visible() and submit_btn.is_enabled():
+                submit_btn.click(force=True)
+                page.wait_for_timeout(2000)
 
-        if error_mismatch.is_visible() or error_cooldown.is_visible():
-            if error_mismatch.is_visible():
-                print(f"[Quest Solver] Answer '{answer}' was rejected by NZXT.")
-            elif error_cooldown.is_visible():
-                print(f"[Quest Solver] Rate limit trigger detected on answer '{answer}'.")
+            error_mismatch = modal.locator('span:has-text("Key phrase does not match")')
+            error_cooldown = modal.locator('span:has-text("A keyphrase was recently submitted")')
 
-            if attempt < max_attempts:
-                print("[Quest Solver] Waiting 32 seconds for rate limit cooldown before trying again...")
-                page.wait_for_timeout(32000)
-        else:
-            print("[Quest Solver] Answer accepted successfully!")
-            page.wait_for_timeout(1500)
-            return True
+            if error_mismatch.is_visible() or error_cooldown.is_visible():
+                if error_mismatch.is_visible():
+                    print(f"[Quest Solver] Answer '{answer}' was rejected by NZXT.")
+                elif error_cooldown.is_visible():
+                    print(f"[Quest Solver] Rate limit trigger detected on answer '{answer}'.")
+                
+                # If there are more candidates in this attempt, wait a moment before trying the next format
+                page.wait_for_timeout(2000)
+            else:
+                print("[Quest Solver] Answer accepted successfully!")
+                page.wait_for_timeout(1500)
+                solved_successfully = True
+                return True
+
+        if not solved_successfully and attempt < max_attempts:
+            print("[Quest Solver] Waiting 32 seconds for rate limit cooldown before trying again...")
+            page.wait_for_timeout(32000)
 
     print("[Quest Solver] Max attempts reached or unable to solve quest.")
     return False
@@ -825,7 +871,7 @@ def verify_session_authentication(page, config):
             sys.exit(1)
 
 def check_quest_date_matches_today(page):
-    """Checks if daily Discord quests (Wordle/Worldle) match today's date string."""
+    """Checks if daily Discord quests (Wordle/Worldle) match today's date string (handling single or double-digit days)."""
     print("[Scheduler] Checking if daily Discord quests have rolled over to today...")
     page.goto("https://club.nzxt.com/v2/discord-quests")
     page.wait_for_timeout(3000)
@@ -835,8 +881,10 @@ def check_quest_date_matches_today(page):
     except Exception:
         pass
 
-    today_str = datetime.now().strftime("%B %d")
-    print(f"[Scheduler] Looking for quest labels containing: '{today_str}'")
+    today_single = datetime.now().strftime("%B %d").replace(" 0", " ")
+    today_double = datetime.now().strftime("%B %d")
+    
+    print(f"[Scheduler] Looking for quest labels containing: '{today_single}' or '{today_double}'")
 
     try:
         quest_elements = page.locator("a[aria-label*='Wordle'], a[aria-label*='WORLD-le']").all()
@@ -849,7 +897,7 @@ def check_quest_date_matches_today(page):
         for el in quest_elements:
             label = el.get_attribute("aria-label") or ""
             print(f"[Scheduler] Found quest label: {label}")
-            if today_str in label:
+            if today_single in label or today_double in label:
                 found_today = True
                 break
 
@@ -1025,8 +1073,8 @@ def run_core_automation(page, browser_context, config):
 def run_automation():
     """Wrapper that runs automation with date check and 15-minute retry intervals."""
     config = load_or_create_config()
-    max_retries = 4
-    retry_delay_minutes = 15
+    max_retries = 10
+    retry_delay_minutes = 30
     attempt = 0
 
     while attempt < max_retries:

@@ -6,7 +6,8 @@ An automated script built with Python and Playwright to navigate and complete da
 
 * **Automated Navigation:** Automatically loops through multiple quest categories (including X, Facebook, Instagram, TikTok, Reddit, YouTube, Twitch, and Discord) to open and complete available quests.
 * **Interactive Quest Solvers:** Automates game-based quests including Worldle and NYT Wordle by executing gameplay on site and scraping revealed solutions.
-* **Smart Quest Date Validation:** Automatically checks if Discord Wordle and Worldle quests have rolled over to today's date, executing 15-minute retry intervals (up to 4 attempts) with clean browser shutdowns if they still display yesterday's date.
+* **Smart Answer Normalization & Fallback:** Automatically tests alternative answer formats (such as trying solutions without hyphens or dashes first) to match platform requirements on the initial try and reduce rate limit triggers.
+* **Smart Quest Date Validation:** Automatically checks if Discord Wordle and Worldle quests have rolled over to today's date, executing retry intervals with clean browser shutdowns if they still display yesterday's date.
 * **Daily Check-In Handling:** Automatically checks in using native role locators to claim daily calendar rewards.
 * **Pucci Points Giveaway Automation:** Automatically purchases entries starting from the highest affordable tier, dynamically validating active buttons and calculating total entries won based on points spent.
 * **Automated Login & 2FA:** Fills account credentials, handles ALTCHA captcha verification, and automatically retrieves 6-digit verification codes via Gmail IMAP.
